@@ -1,5 +1,8 @@
-"""PPE Guardhouse Cloud: read-only private dashboard; no CCTV secrets in browser."""
+"""PPE Guardhouse Cloud: authenticated read-only dashboard; no CCTV secrets in browser."""
 from datetime import datetime
+import hashlib
+import hmac
+import time
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -11,6 +14,62 @@ st.markdown('''<style>
 .block-container {max-width:1500px;padding-top:2rem}
 [data-testid="stMetric"] {background:rgba(128,128,128,.08);padding:.6rem;border-radius:10px}
 </style>''', unsafe_allow_html=True)
+
+# Gate ALL CCTV, events and API requests behind a login check.
+# Password is verified using PBKDF2-HMAC-SHA256; no plaintext password in GitHub.
+def check_login():
+    try:
+        username = str(st.secrets['AUTH_USERNAME'])
+        salt = bytes.fromhex(str(st.secrets['AUTH_PASSWORD_SALT']))
+        expected_hash = bytes.fromhex(str(st.secrets['AUTH_PASSWORD_HASH']))
+        if len(salt) < 16 or len(expected_hash) != 32 or not username:
+            raise ValueError('Invalid authentication configuration')
+    except (KeyError, ValueError, TypeError):
+        st.error('Login is not configured. Set AUTH_USERNAME, AUTH_PASSWORD_SALT and AUTH_PASSWORD_HASH in Streamlit Secrets.')
+        st.stop()
+
+    if st.session_state.get('ppe_authenticated', False):
+        with st.sidebar:
+            st.success('Signed in')
+            if st.button('Log out', use_container_width=True):
+                st.session_state['ppe_authenticated'] = False
+                st.rerun()
+        return
+
+    st.title('🔐 PPE Guardhouse Login')
+    st.caption('Authorized personnel only · CCTV and worker safety records')
+    locked_until = st.session_state.get('ppe_locked_until', 0.0)
+    if time.monotonic() < locked_until:
+        st.error('Too many attempts. Please wait five minutes before trying again.')
+        st.stop()
+
+    with st.form('ppe_login_form', clear_on_submit=True):
+        supplied_user = st.text_input('Username')
+        supplied_password = st.text_input('Password', type='password')
+        submitted = st.form_submit_button('Sign in', use_container_width=True)
+
+    if submitted:
+        candidate = hashlib.pbkdf2_hmac('sha256', supplied_password.encode('utf-8'), salt, 310_000)
+        # Compare both credentials without a short-circuit on password validation.
+        user_ok = hmac.compare_digest(supplied_user.encode('utf-8'), username.encode('utf-8'))
+        pass_ok = hmac.compare_digest(candidate, expected_hash)
+        if user_ok and pass_ok:
+            st.session_state['ppe_authenticated'] = True
+            st.session_state['ppe_failed_attempts'] = 0
+            st.rerun()
+        else:
+            attempts = st.session_state.get('ppe_failed_attempts', 0) + 1
+            st.session_state['ppe_failed_attempts'] = attempts
+            if attempts >= 5:
+                st.session_state['ppe_locked_until'] = time.monotonic() + 300
+                st.session_state['ppe_failed_attempts'] = 0
+                st.error('Too many attempts. Please wait five minutes before trying again.')
+            else:
+                st.error('Invalid username or password.')
+    st.stop()
+
+
+check_login()
 
 try:
     BASE_URL = str(st.secrets['JETSON_API_URL']).rstrip('/')
