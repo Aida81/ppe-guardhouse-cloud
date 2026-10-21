@@ -111,7 +111,10 @@ with left:
         except (requests.RequestException, ValueError) as exc:
             st.error(f'Jetson not reachable: {type(exc).__name__}')
             return
-        st.success('● Detector RUNNING') if data['detector_running'] else st.warning('● Detector STOPPED')
+        if data['detector_running']:
+            st.success('● Detector RUNNING')
+        else:
+            st.warning('● Detector STOPPED')
         today = data['today']
         a, b = st.columns(2)
         a.metric('Alert groups', today['alert_groups'])
